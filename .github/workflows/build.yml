@@ -24,28 +24,62 @@ jobs:
 
       - name: Cook Variables from gradle.properties
         run : |
+          set -euo pipefail
           name=$(grep '^extName=' gradle.properties | cut -d'=' -f2)
+          if [ -z "${name:-}" ]; then
+            echo "::error::Missing extName in gradle.properties"
+            exit 1
+          fi
           echo "NAME=$name Extension" >> $GITHUB_ENV
           id=$(grep '^extId=' gradle.properties | cut -d'=' -f2)
+          if [ -z "${id:-}" ]; then
+            echo "::error::Missing extId in gradle.properties"
+            exit 1
+          fi
           echo "TAG=$id" >> $GITHUB_ENV
 
       - name: Make Environment
         run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.KEYSTORE_B64 }}" ]; then
+            echo "::error::Missing KEYSTORE_B64 secret"
+            exit 1
+          fi
+          if [ -z "${{ secrets.PASSWORD }}" ]; then
+            echo "::error::Missing PASSWORD secret"
+            exit 1
+          fi
           version=$( echo ${{ github.event.head_commit.id }} | cut -c1-7 )
           echo "VERSION=v$version" >> $GITHUB_ENV
           echo -e "## ${{ env.NAME }}\n${{ github.event.head_commit.message }}" > commit.txt
           echo "APP_PATH=app/build/${{ env.TAG }}-$version.eapk" >> $GITHUB_ENV
-          echo "${{ secrets.KEYSTORE_B64 }}" | base64 -d > $GITHUB_WORKSPACE/signing-key.jks
+          keystore_path="$GITHUB_WORKSPACE/signing-key.jks"
+          if ! printf '%s' "${{ secrets.KEYSTORE_B64 }}" | tr -d '\r\n' | base64 --decode > "$keystore_path"; then
+            echo "::error::KEYSTORE_B64 is not valid base64 data"
+            exit 1
+          fi
+          if [ ! -s "$keystore_path" ]; then
+            echo "::error::Decoded keystore file is empty"
+            exit 1
+          fi
+          if ! keytool -list -keystore "$keystore_path" -storepass "${{ secrets.PASSWORD }}" -alias key0 >/dev/null 2>&1; then
+            echo "::error::Invalid keystore/password or missing key alias 'key0'"
+            exit 1
+          fi
           chmod +x ./gradlew
 
       - name: Build with Gradle
         run: |
+          set -euo pipefail
           ./gradlew assembleDebug \
           -Pandroid.injected.signing.store.file=$GITHUB_WORKSPACE/signing-key.jks \
           -Pandroid.injected.signing.store.password=${{ secrets.PASSWORD }} \
           -Pandroid.injected.signing.key.alias=key0 \
           -Pandroid.injected.signing.key.password=${{ secrets.PASSWORD }}
-          
+          if [ ! -f app/build/outputs/apk/debug/app-debug.apk ]; then
+            echo "::error::Expected APK was not generated"
+            exit 1
+          fi
           cp app/build/outputs/apk/debug/app-debug.apk ${{ env.APP_PATH }}
 
       - name: Upload APK
